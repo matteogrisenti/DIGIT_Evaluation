@@ -9,12 +9,6 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
-import unittest.mock as mock
-if 'xformers' not in sys.modules:
-    sys.modules['xformers'] = mock.MagicMock()
-    sys.modules['xformers.ops'] = mock.MagicMock()
-    # Aggiungiamo anche fmha per sicurezza, visto l'errore precedente
-    sys.modules['xformers.ops.fmha'] = mock.MagicMock()
 
 # 1. Configurazione dei Path: Aggiungiamo il sottomodulo sparsh al path di Python
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,6 +59,12 @@ def load_sparsh_models(checkpoints_dir, device):
     encoder.load_state_dict(encoder_state_dict, strict=False)
     encoder.to(device)
     encoder.eval()
+
+    import unittest.mock as mock
+    if 'xformers' not in sys.modules:
+        sys.modules['xformers'] = mock.MagicMock()
+        sys.modules['xformers.ops'] = mock.MagicMock()
+        sys.modules['xformers.ops.fmha'] = mock.MagicMock()
     
     # --- 2. Initialization of Decoder DPT (Force Field) ---
     print("Instantiating decoder model...")
@@ -150,83 +150,115 @@ def main():
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device detected and used: {DEVICE}")
     
-    # 1. Carica i modelli PyTorch
+    # 1. Upload DINO Encoder e DPT Decoder on device (GPU/CPU)
     encoder, decoder = load_sparsh_models(CHECKPOINTS_DIR, DEVICE)
     
-    # 2. Connessione al sensore DIGIT usando il tuo backend Windows (indice camera 0, 1, ecc.)
-    # print("Inizializzazione del sensore DIGIT su Windows...")
-    # digit_sensor = Digit(device_index=0, name="Windows_DIGIT")
-    # digit_sensor.connect()
+    # 2. Connection to DIGIT Sensor using custom Windows driver
+    print("Initializing connection to DIGIT sensor on Windows...")
+    digit_sensor = Digit(device_index=0, name="Windows_DIGIT")
+    digit_sensor.connect()
     
-    # # 3. Acquisizione del Frame di Background (Il gel deve essere a riposo, senza contatto!)
-    # print("Acquisizione frame di background in corso... Non toccare il sensore.")
-    # # Attendiamo qualche frame per stabilizzare l'esposizione automatica della camera
-    # for _ in range(10):
-    #     _ = digit_sensor.get_frame()
-    # bg_frame = digit_sensor.get_frame()
-    # print("Background acquisito con successo!")
+    # 3. Background Acquisition: Sparsh relies on background subtraction for robust tactile perception. 
+    # We capture a stable background frame at the start of the pipeline to use for pre-processing all subsequent frames.
+    print("Acquiring background frame for subtraction... Please ensure the sensor is not in contact with any object.")
+    # wait a few frames to stabilize the sensor and then capture the background
+    for _ in range(10):
+        _ = digit_sensor.get_frame()
+    bg_frame = digit_sensor.get_frame()
+    print("Background frame acquired successfully.")
+    # # DEBUG: saving the background frame for inspection
+    # cv2.imwrite("bg_frame_windows.png", bg_frame)
     
-    # # 4. Buffer Temporale: Sparsh richiede la storia recente per stimare lo slittamento e le forze di taglio.
-    # # Usiamo una coda a dimensione fissa per memorizzare gli ultimi 6 frame pre-processati.
-    # # Questo ci permette di recuperare istantaneamente I_t e I_{t-5}
-    # frame_history = collections.deque(maxlen=6)
+    # 4. Temporal Buffer: Sparsh encoder require two frame in input: 
+    #      - the one at time t 
+    #      - the one at time t - 5.
+    # We use a deque with maxlen=6 to keep the last 6 frames.
+    # This allows us to collect the I_t (last) e I_{t-5} (first) frame
+    frame_history = collections.deque(maxlen=6)
     
-    # print("\nPipeline avviata! Premi 'ESC' sulla finestra video per uscire.")
+    print("\nPipeloine started! Press 'ESC' on the video window to exit.")
     
-    # try:
-    #     while True:
-    #         # Cattura il frame corrente dal sensore Windows
-    #         raw_frame = digit_sensor.get_frame()
+    try:
+        while True:
+            # capture a new frame from the DIGIT sensor
+            raw_frame = digit_sensor.get_frame()
             
-    #         # Applica pre-processing (Sottrazione BG + Resize 224x224)
-    #         processed_frame = pre_process_frame(raw_frame, bg_frame)
-    #         frame_history.append(processed_frame)
+            # Applay Preprocessing (background subtraction, normalization, resizing) 
+            processed_frame = pre_process_frame(raw_frame, bg_frame)
+            frame_history.append(processed_frame)
             
-    #         # Se il buffer non è ancora pieno (servono almeno 6 frame), saltiamo l'inferenza
-    #         if len(frame_history) < 6:
-    #             continue
+            # If the history buffer is not full yet, we cannot perform inference 
+            # (we need at least 6 frames to have I_t and I_{t-5})
+            if len(frame_history) < 6:
+                continue
                 
-    #         # Recuperiamo I_t e I_{t-5} per creare la finestra di inferenza di ~80ms
-    #         I_t = frame_history[-1]      # Ultimo inserito
-    #         I_t_minus_5 = frame_history[0] # Primo inserito (5 passi indietro)
+            # Take the last frame (I_t) and the frame from 5 steps back (I_{t-5}) 
+            I_t = frame_history[-1]         # Last inserted (current frame)
+            I_t_minus_5 = frame_history[0]  # First inserted (5 steps back)
             
-    #         # Concatena i due frame lungo la dimensione dei canali (H, W, 3+3 = 6)
-    #         input_channels = np.concatenate([I_t, I_t_minus_5], axis=-1) 
+            # Concatena i due frame lungo la dimensione dei canali (H, W, 3+3 = 6)
+            input_channels = np.concatenate([I_t, I_t_minus_5], axis=-1) 
             
-    #         # Adatta la forma per PyTorch da [H, W, C] a [B, C, H, W] -> [1, 6, 224, 224]
-    #         input_tensor = torch.from_numpy(input_channels).permethod((2, 0, 1)).unsqueeze(0).to(DEVICE)
+            # Abdate the shape for PyTorch from [H, W, C] to [B, C, H, W] -> [1, 6, 224, 224]
+            input_tensor = torch.from_numpy(input_channels).permute((2, 0, 1)).unsqueeze(0).to(DEVICE)
             
-    #         # --- INFERENZA PYTORCH (Frozen Encoder) ---
-    #         with torch.no_grad():
-    #             # Passaggio nell'encoder DINO (estrazione feature layer intermedi 2, 5, 8, 11)
-    #             # intermediate_features = encoder.get_intermediate_layers(input_tensor, n=[2, 5, 8, 11])
+            # --- INFERENZA PYTORCH (Frozen Encoder) ---
+            with torch.no_grad():
+                # 1. Estraiamo la tupla di tensori dall'encoder
+                intermediate_features = encoder.get_intermediate_layers(
+                    input_tensor, 
+                    n=[2, 5, 8, 11], 
+                )
                 
-    #             # Passaggio nel decoder DPT per la stima densa delle forze
-    #             # normal_field, shear_field = decoder(intermediate_features)
+                # 2. TRUCCO: Trasformiamo la tupla nel Dizionario che il Decoder si aspetta!
+                # Diamo delle chiavi fittizie (i nomi dei layer) in ordine.
+                features_dict = {
+                    "t2": intermediate_features[0],
+                    "t5": intermediate_features[1],
+                    "t8": intermediate_features[2],
+                    "t11": intermediate_features[3]
+                }
                 
-    #             # Mock output per visualizzazione temporanea
-    #             normal_field_mock = np.zeros((224, 224, 1))
-    #             shear_field_mock = np.zeros((224, 224, 2))
-            
-    #         # 5. Rendering del Campo di Forze
-    #         output_view = draw_force_field(normal_field_mock, shear_field_mock)
-            
-    #         # Mostra la vista live ed il feed della camera originale
-    #         cv2.imshow("DIGIT Raw Frame (Windows)", raw_frame)
-    #         cv2.imshow("Sparsh Force Field Visualization", output_view)
-            
-    #         # Interrompi se l'utente preme ESC
-    #         if cv2.waitKey(1) == 27:
-    #             break
+                # 3. Passiamo il dizionario al decoder
+                force_field_pred = decoder(features_dict)
                 
-    # except Exception as e:
-    #     print(f"Errore durante l'esecuzione della pipeline: {e}")
+                # 4. Estrazione dei canali di output e conversione per OpenCV
+                if isinstance(force_field_pred, dict):
+                    normal_tensor = force_field_pred.get("normal", force_field_pred.get("depth"))
+                    shear_tensor = force_field_pred.get("shear", force_field_pred.get("flow"))
+                elif isinstance(force_field_pred, (tuple, list)):
+                    normal_tensor = force_field_pred[0]
+                    shear_tensor = force_field_pred[1]
+                else:
+                    normal_tensor = force_field_pred[:, 0:1, :, :]
+                    shear_tensor = force_field_pred[:, 1:3, :, :]
+
+                # Trasformazione per OpenCV
+                normal_field = normal_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                shear_field = shear_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            
+            # 5. Rendering del Campo di Forze
+            output_view = draw_force_field(normal_field, shear_field)
+            
+            # Mostra la vista live ed il feed della camera originale
+            cv2.imshow("DIGIT Raw Frame (Windows)", raw_frame)
+            cv2.imshow("Sparsh Force Field Visualization", output_view)
+            
+            # Interrompi se l'utente preme ESC
+            if cv2.waitKey(1) == 27:
+                break
+                
+    except Exception as e:
+        import traceback
+        print("\n" + "!"*60)
+        print("ERRORE CRITICO NELLA PIPELINE - ECCO I DETTAGLI:")
+        traceback.print_exc()
+        print("!"*60 + "\n")
         
-    # finally:
-    #     # Chiusura pulita del sensore
-    #     print("Disconnessione dal sensore DIGIT...")
-    #     digit_sensor.disconnect()
-    #     cv2.destroyAllWindows()
+    finally:
+        print("Disconnessione dal sensore DIGIT...")
+        digit_sensor.disconnect()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
