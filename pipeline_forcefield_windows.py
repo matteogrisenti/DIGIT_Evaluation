@@ -241,7 +241,8 @@ def main():
             output_view = draw_force_field(normal_field, shear_field)
             
             # Mostra la vista live ed il feed della camera originale
-            cv2.imshow("DIGIT Raw Frame (Windows)", raw_frame)
+            raw_frame_pulito = np.ascontiguousarray(raw_frame)
+            cv2.imshow("DIGIT Raw Frame (Windows)", raw_frame_pulito)
             cv2.imshow("Sparsh Force Field Visualization", output_view)
             
             # Interrompi se l'utente preme ESC
