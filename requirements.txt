@@ -1,2 +1,24 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+# --- Core PyTorch (Accelerazione GPU CUDA 11.8) ---
+torch
+torchvision
+torchaudio
+
+# --- Vision & Utilities ---
 Pillow
 opencv-python
+matplotlib
+
+# --- Modeling & Tensors ---
+einops
+timm
+safetensors
+
+# --- Framework, Download & Configs ---
+huggingface_hub
+lightning 
+hydra-core 
+omegaconf
+scipy
+scikit-learn
