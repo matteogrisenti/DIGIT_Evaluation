@@ -9,6 +9,8 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
+from utils.draw_force_field_utility import draw_force_field
+
 
 # 1. Configurazione dei Path: Aggiungiamo il sottomodulo sparsh al path di Python
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -128,22 +130,6 @@ def pre_process_frame(frame, bg_frame):
     return frame_resized
 
 
-def draw_force_field(normal_field, shear_field):
-    """
-    Prende l'output denso del decoder DPT e genera l'immagine del campo di forze.
-    Le frecce rappresentano la forza di taglio, il colore lo schiacciamento normale.
-    """
-    # normal_field: mappa di profondità densa (es. 224x224x1) [cite: 168]
-    # shear_field: mappa del flusso ottico densa (es. 224x224x2) [cite: 168]
-    
-    # Creiamo un canvas per la visualizzazione
-    vis_image = np.zeros((224, 224, 3), dtype=np.uint8)
-    
-    # TODO: Logica di disegno vettoriale OpenCV (cv2.arrowedLine) 
-    # Mappa le forze normali sui canali colore e disegna le frecce di taglio ad intervalli regolari (stride es. 10px) [cite: 763]
-    
-    return vis_image
-
 def main():
     # Definiamo i percorsi dei checkpoint
     CHECKPOINTS_DIR = os.path.join(CURRENT_DIR, "outputs_sparsh", "checkpoints")
@@ -168,6 +154,43 @@ def main():
     print("Background frame acquired successfully.")
     # # DEBUG: saving the background frame for inspection
     # cv2.imwrite("bg_frame_windows.png", bg_frame)
+
+    # --- NUOVO: CALIBRAZIONE DELLO ZERO DELLA RETE ---
+    print("Calibrazione dello zero del campo di forze... Attendi...")
+    zero_magnitudes = []
+
+    # --- CALIBRAZIONE DINAMICA DELLO ZERO ---
+    print("Calibrazione dello zero del campo di forze (Movimento a vuoto)...")
+    zero_magnitudes = []
+    calib_history = collections.deque(maxlen=6)
+    
+    with torch.no_grad():
+        for _ in range(25): # Facciamo girare il buffer per stabilizzarlo
+            raw_f = digit_sensor.get_frame()
+            proc_f = pre_process_frame(raw_f, bg_frame)
+            calib_history.append(proc_f)
+            
+            if len(calib_history) == 6:
+                I_t = calib_history[-1]
+                I_t_minus_5 = calib_history[0]
+                input_chan = np.concatenate([I_t, I_t_minus_5], axis=-1)
+                in_tensor = torch.from_numpy(input_chan).permute((2, 0, 1)).unsqueeze(0).to(DEVICE)
+                
+                inter_feat = encoder.get_intermediate_layers(in_tensor, n=[2, 5, 8, 11])
+                f_dict = {"t2": inter_feat[0], "t5": inter_feat[1], "t8": inter_feat[2], "t11": inter_feat[3]}
+                pred = decoder(f_dict)
+                
+                if isinstance(pred, dict):
+                    sh_tensor = pred.get("shear", pred.get("flow"))
+                else:
+                    sh_tensor = pred[:, 1:3, :, :]
+                    
+                sh_field = sh_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                mag_map = np.sqrt(sh_field[:, :, 0]**2 + sh_field[:, :, 1]**2)
+                zero_magnitudes.append(mag_map.max())
+                
+    FORCE_BIAS = np.mean(zero_magnitudes) if len(zero_magnitudes) > 0 else 0.0
+    print(f"Calibrazione completata. Bias reale rilevato: {FORCE_BIAS:.4f}")
     
     # 4. Temporal Buffer: Sparsh encoder require two frame in input: 
     #      - the one at time t 
@@ -238,11 +261,17 @@ def main():
                 shear_field = shear_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
             
             # 5. Rendering del Campo di Forze
-            output_view = draw_force_field(normal_field, shear_field)
+            output_view = draw_force_field(
+                normal_field, 
+                shear_field, 
+                raw_shape=raw_frame.shape,
+                force_bias=0.0,  # Applichiamo il bias di forza calibrato per ottenere un campo più realistico
+                stride=20,        # Cambia questo valore per avere una griglia più densa (es. 10) o più rada (es. 20)
+                arrow_scale=10.0  # Cambia questo per allungare/accorciare le frecce
+            )
             
             # Mostra la vista live ed il feed della camera originale
-            raw_frame_pulito = np.ascontiguousarray(raw_frame)
-            cv2.imshow("DIGIT Raw Frame (Windows)", raw_frame_pulito)
+            cv2.imshow("DIGIT Raw Frame (Windows)", raw_frame)
             cv2.imshow("Sparsh Force Field Visualization", output_view)
             
             # Interrompi se l'utente preme ESC

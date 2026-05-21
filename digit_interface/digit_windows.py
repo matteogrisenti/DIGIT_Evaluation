@@ -86,16 +86,24 @@ class Digit(DigitDefaults):
             )
             raise Exception(f"Error opening video stream: {self.dev_name}")
         
-        # set stream defaults, QVGA at 60 fps
-        logger.info(
-            f"{self.serial}:Setting stream defaults to QVGA, 60fps, maximum LED intensity."
-        )
-        logger.debug(f"Default stream to QVGA {self.STREAMS['QVGA']['resolution']}")
+        # FIX 1: BUFFER A 1 (Evita lo slittamento dell'immagine nel tempo)
+        self.__dev.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        # FIX 2: CODEC MJPEG (Evita lo sfarfallio e i blocchi del frame)
+        self.__dev.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        
+        # Risoluzione standard
         self.set_resolution(self.STREAMS["QVGA"])
-        logger.debug(f"Default stream with {self.STREAMS['QVGA']['fps']['60fps']} fps")
-        self.set_fps(self.STREAMS["QVGA"]["fps"]["60fps"])
-        logger.debug("Setting maximum LED illumination intensity")
+        
+        # FIX 3: 30 FPS FISSI (Mantiene la porta USB stabile senza sovraccaricarla)
+        self.set_fps(self.STREAMS["QVGA"]["fps"]["30fps"])
+        
+        # Accende i LED
         self.set_intensity(15)
+        
+        # FIX 4: DISABILITA AUTO-ESPOSIZIONE (Evita che l'immagine lampeggi scura/chiara)
+        self.__dev.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        self.__dev.set(cv2.CAP_PROP_EXPOSURE, -5)
 
     def set_resolution(self, resolution: typing.Dict) -> None:
         """
@@ -179,8 +187,12 @@ class Digit(DigitDefaults):
                 f"Unable to grab frame from {self.serial} - {self.dev_name}!"
             )
         if not transpose:
-            frame = cv2.transpose(frame, frame)
+            # FIX IMMAGINE SPEZZATA E MEMORIA: Niente 'frame' come secondo parametro
+            frame = cv2.transpose(frame)
             frame = cv2.flip(frame, 0)
+            # Forza l'allineamento in RAM per Windows
+            frame = np.ascontiguousarray(frame)
+
         return frame
 
     def save_frame(self, path: str) -> np.ndarray:
