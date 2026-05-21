@@ -9,8 +9,7 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
-from utils.draw_force_field_utility import draw_force_field
-from utils.draw_heat_map_utility import draw_heat_map
+from utils.display_tools import build_combined_view, show_frames, should_quit, teardown_windows
 
 
 from utils.xformers_mock import patch_xformers
@@ -183,36 +182,11 @@ def main():
                 normal_field = normal_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
                 shear_field = shear_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
             
-            # 4. Rendering grafico del campo di forze
-            output_view = draw_force_field(
-                normal_field, 
-                shear_field, 
-                raw_shape=raw_frame.shape,
-                force_bias=0.0,    # Lasciamo a 0.0 per analizzare la dinamica pura dei pesi reali
-                stride=14,         # Dimensione ottimale della griglia per i patch ViT
-                arrow_scale=15.0   # Moltiplicatore di visibilità delle frecce
-            )
-            
-            heatmap_view = draw_heat_map(
-                normal_field, 
-                raw_shape=raw_frame.shape,
-                max_force=2.0 # Increase this if the screen turns red too easily
-            )
-            
-            # 5. Combine the views horizontally
-            combined_view = np.hstack((output_view, heatmap_view))
-            
-            # Add labels
-            cv2.putText(combined_view, "Force Field", (10, 20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            cv2.putText(combined_view, "Normal Heatmap", (raw_frame.shape[1] + 10, 20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            
-            # 6. Show the screens
-            cv2.imshow("DIGIT Raw Frame", raw_frame)
-            cv2.imshow("Sparsh Multi-View", combined_view)
-            
-            if cv2.waitKey(1) == 27:
+            # 6. Render and display
+            combined = build_combined_view(normal_field, shear_field, raw_frame)
+            show_frames(raw_frame, combined)
+ 
+            if should_quit():
                 break
                 
     except Exception as e:
