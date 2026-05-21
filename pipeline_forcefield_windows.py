@@ -13,21 +13,30 @@ from utils.draw_force_field_utility import draw_force_field
 
 
 # ==============================================================================
-# 1. TRUCCO DI BYPASS HARDWARE (MOCK XFORMERS PER WINDOWS)
+# 1. TRUCCO DI BYPASS HARDWARE CHIRURGICO PER WINDOWS
 # ==============================================================================
-import unittest.mock as mock
+import sys
 
-# Creiamo una struttura a cipolla finta per simulare xformers prima degli import di Sparsh
-mock_xformers = mock.MagicMock()
-mock_ops = mock.MagicMock()
-mock_fmha = mock.MagicMock()
+# Invece di usare un MagicMock (che finge di avere tutto), creiamo classi vuote
+# che contengono SOLO quello che serve a 'dinov2.py' per avviarsi.
+class MockFmha:
+    pass
 
-mock_ops.fmha = mock_fmha
-mock_xformers.ops = mock_ops
+class MockOps:
+    fmha = MockFmha()
+    # ATTENZIONE: Non inseriamo di proposito 'memory_efficient_attention' o 'unbind'.
+    # In questo modo, quando attention.py cercherà di importarli, riceverà un ImportError
+    # e si affiderà correttamente al motore di fallback nativo di PyTorch!
 
-sys.modules['xformers'] = mock_xformers
-sys.modules['xformers.ops'] = mock_ops
-sys.modules['xformers.ops.fmha'] = mock_fmha
+class MockXformers:
+    ops = MockOps()
+
+if 'xformers' not in sys.modules:
+    sys.modules['xformers'] = MockXformers()
+    sys.modules['xformers.ops'] = MockOps()
+    sys.modules['xformers.ops.fmha'] = MockFmha()
+
+# ==============================================================================
 
 
 # 1. Configurazione dei Path: Aggiungiamo il sottomodulo sparsh al path di Python
@@ -41,86 +50,81 @@ from digit_interface.digit_windows import Digit
 
 # Importa i modelli Sparsh
 from sparsh.tactile_ssl.model.vision_transformer import vit_base
-from sparsh.tactile_ssl.downstream_task.forcefield_sl import ForceFieldDecoder
+from sparsh.tactile_ssl.downstream_task.forcefield_sl import ForceFieldModule
 
 
 def load_sparsh_models(checkpoints_dir, device):
     """
-    Upload of the DINO Encoder and DPT Decoder models to the specified device (GPU/CPU).
+    Carica l'Encoder e il Decoder usando le configurazioni originali (Hydra),
+    li unisce in ForceFieldModule e carica i pesi unificati.
     """
-    
     print(f"Uploading models to device: {device}")
     
-    # --- 1. Initialization of Encoder DINO (ViT-Base) ---
-    # Sparsh DINO Base use a ViT-Base with patch of 14 and 6 channel in input
+    # --- 1. Initialization of Encoder DINO (ViT-Base) come da tuo vecchio file ---
+    print("Instantiating encoder model...")
     encoder = vit_base(
         img_size=224,
         in_chans=6,            # 6 channels: 3 for I_t and 3 for I_{t-5} 
-        patch_size=14,         # Sparsh DINO Base uses patch size of 14
-        num_register_tokens=1  
+        patch_size=16,         
+        num_register_tokens=1  # Recuperato dal tuo codice originale!
     )
     
-    # Upload encoder weights
-    encoder_path = os.path.join(checkpoints_dir, "encoder_dino", "dino_vitbase.ckpt")
-    print("Uploading encoder weights...")
-
-    # Load the .ckpt file
-    checkpoint = torch.load(encoder_path, map_location=device, weights_only=False)
+    # --- 2. Initialization of Decoder DPT (Force Field) via Hydra ---
+    print("Instantiating decoder model via Hydra config...")
+    config_path = os.path.join(
+        SPARSH_SUBMODULE_PATH, 
+        "config", "experiment", "downstream_task", "forcefield", "digit_dino.yaml"
+    )
+    cfg = OmegaConf.load(config_path)
+    decoder_cfg = cfg.task.model_task
+    decoder = instantiate(decoder_cfg)
     
-    # Extract the state_dict from the checkpoint. Depending on how it was saved.
-    if "state_dict" in checkpoint:
-        encoder_state_dict = checkpoint["state_dict"]
-    else:
-        encoder_state_dict = checkpoint 
+    # --- 3. Creazione del Modulo Contenitore (ForceFieldModule) ---
+    print("Wrapping Encoder and Decoder in ForceFieldModule...")
+    # Creiamo un finto ssl_config per soddisfare il costruttore della classe senza crash
+    dummy_ssl_config = {
+        "img_sz": (224, 224),
+        "loss": {
+            "with_sl_supervision": False,
+            "with_mask_supervision": False,
+            "with_ssim": False,
+            "min_depth": 0.1,
+            "max_depth": 10.0
+        },
+        "pose_estimator": {"num_encoder_layers": 18}
+    }
     
-    # Clean the state_dict keys if they have unwanted prefixes (e.g., 'backbone.' or 'model_task.')
-    if "backbone" in list(encoder_state_dict.keys())[0]:
-        encoder_state_dict = {k.replace("backbone.", ""): v for k, v in encoder_state_dict.items()}
-        
-    encoder.load_state_dict(encoder_state_dict, strict=False)
-    encoder.to(device)
-    encoder.eval()
+    model_module = ForceFieldModule(
+        model_encoder=encoder,
+        model_task=decoder,
+        optim_cfg=None,
+        scheduler_cfg=None,
+        ssl_config=dummy_ssl_config
+    )
     
-    # --- 2. Inizializzazione Decoder DPT ---
-    decoder = ForceFieldDecoder()
+    # --- 4. Caricamento dei Pesi Unificati (Il file .ckpt combinato) ---
+    print("Uploading unified weights...")
+    # Sostituisci questo percorso se il nome del file che abbiamo ispezionato è in una cartella diversa
+    checkpoint_path = os.path.join(checkpoints_dir, "forcefield_decoder", "digit_t1_forcefield_dino_vitbase_bg", 
+                                   "checkpoints", "last.ckpt")
     
-    # Carichiamo il file del checkpoint combinato
-    decoder_path = os.path.join(checkpoints_dir, "forcefield_decoder", "digit_t1_forcefield_dino_vitbase_bg", "checkpoints","last.ckpt")
-    checkpoint = torch.load(decoder_path, map_location=device, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # Estraiamo il dizionario globale "model" scoperto dal test
     if "model" in checkpoint:
         global_weights = checkpoint["model"]
+    elif "state_dict" in checkpoint:
+        global_weights = checkpoint["state_dict"]
     else:
-        raise Exception("Errore critico: Impossibile trovare la macro-chiave 'model' nel checkpoint!")
+        global_weights = checkpoint
         
-    # SEPARAZIONE CHIRURGICA DEI PESI
-    clean_decoder_dict = {}
-    for k, v in global_weights.items():
-        # Se la chiave appartiene al decoder (inizia con model_task.)
-        if k.startswith("model_task."):
-            # Rimuoviamo il prefisso 'model_task.' per farlo combaciare col nostro modello locale
-            # Es: 'model_task.reassembles.0...' diventa 'reassembles.0...'
-            new_k = k.replace("model_task.", "")
-            clean_decoder_dict[new_k] = v
-
-    # CARICAMENTO PARAMETRI NEL DECODER
-    # Usiamo strict=True per essere sicuri che ogni singolo peso combaci al 100%
-    try:
-        decoder.load_state_dict(clean_decoder_dict, strict=True)
-        print("--> [SUCCESS] Decoder caricato e sincronizzato al 100% con strict=True!")
-    except RuntimeError as e:
-        print("\n" + "!"*60)
-        print("Mismatch parziale nelle chiavi della testa predittiva.")
-        print("Caricamento forzato in modalità adattiva (strict=False).")
-        print("!"*60)
-        decoder.load_state_dict(clean_decoder_dict, strict=False)
-
-    decoder.to(device)
-    decoder.eval()
+    # Carichiamo i pesi (strict=False perché ignoriamo la testa di PoseEstimator non usata)
+    model_module.load_state_dict(global_weights, strict=False)
     
-    print("Tutti i modelli sono stati caricati e sono pronti per l'inferenza.")
-    return encoder, decoder
+    model_module.to(device)
+    model_module.eval()
+    
+    print(f"ForceFieldModule uploaded successfully on {device}")
+    return model_module
 
 
 def pre_process_frame(frame, bg_frame):
@@ -140,164 +144,93 @@ def pre_process_frame(frame, bg_frame):
 
 
 def main():
-    # Definiamo i percorsi dei checkpoint
     CHECKPOINTS_DIR = os.path.join(CURRENT_DIR, "outputs_sparsh", "checkpoints")
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device detected and used: {DEVICE}")
+    print(f"Device rilevato: {DEVICE}")
     
-    # 1. Upload DINO Encoder e DPT Decoder on device (GPU/CPU)
-    encoder, decoder = load_sparsh_models(CHECKPOINTS_DIR, DEVICE)
+    # 1. Caricamento del modulo contenitore completo
+    model_module = load_sparsh_models(CHECKPOINTS_DIR, DEVICE)
     
-    # 2. Connection to DIGIT Sensor using custom Windows driver
-    print("Initializing connection to DIGIT sensor on Windows...")
+    # 2. Connessione hardware al sensore DIGIT
+    print("Inizializzazione connessione DIGIT su Windows...")
     digit_sensor = Digit(device_index=0, name="Windows_DIGIT")
     digit_sensor.connect()
     
-    # 3. Background Acquisition: Sparsh relies on background subtraction for robust tactile perception. 
-    # We capture a stable background frame at the start of the pipeline to use for pre-processing all subsequent frames.
-    print("Acquiring background frame for subtraction... Please ensure the sensor is not in contact with any object.")
-    # wait a few frames to stabilize the sensor and then capture the background
+    print("Acquisisco il background... Non toccare il gel...")
     for _ in range(10):
         _ = digit_sensor.get_frame()
     bg_frame = digit_sensor.get_frame()
-    print("Background frame acquired successfully.")
-    # # DEBUG: saving the background frame for inspection
-    # cv2.imwrite("bg_frame_windows.png", bg_frame)
+    print("Background acquisito con successo.")
 
-    # --- NUOVO: CALIBRAZIONE DELLO ZERO DELLA RETE ---
-    print("Calibrazione dello zero del campo di forze... Attendi...")
-    zero_magnitudes = []
-
-    # --- CALIBRAZIONE DINAMICA DELLO ZERO ---
-    print("Calibrazione dello zero del campo di forze (Movimento a vuoto)...")
-    zero_magnitudes = []
-    calib_history = collections.deque(maxlen=6)
-    
-    with torch.no_grad():
-        for _ in range(25): # Facciamo girare il buffer per stabilizzarlo
-            raw_f = digit_sensor.get_frame()
-            proc_f = pre_process_frame(raw_f, bg_frame)
-            calib_history.append(proc_f)
-            
-            if len(calib_history) == 6:
-                I_t = calib_history[-1]
-                I_t_minus_5 = calib_history[0]
-                input_chan = np.concatenate([I_t, I_t_minus_5], axis=-1)
-                in_tensor = torch.from_numpy(input_chan).permute((2, 0, 1)).unsqueeze(0).to(DEVICE)
-                
-                inter_feat = encoder.get_intermediate_layers(in_tensor, n=[2, 5, 8, 11])
-                f_dict = {"t2": inter_feat[0], "t5": inter_feat[1], "t8": inter_feat[2], "t11": inter_feat[3]}
-                pred = decoder(f_dict)
-                
-                if isinstance(pred, dict):
-                    sh_tensor = pred.get("shear", pred.get("flow"))
-                else:
-                    sh_tensor = pred[:, 1:3, :, :]
-                    
-                sh_field = sh_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-                mag_map = np.sqrt(sh_field[:, :, 0]**2 + sh_field[:, :, 1]**2)
-                zero_magnitudes.append(mag_map.max())
-                
-    FORCE_BIAS = np.mean(zero_magnitudes) if len(zero_magnitudes) > 0 else 0.0
-    print(f"Calibrazione completata. Bias reale rilevato: {FORCE_BIAS:.4f}")
-    
-    # 4. Temporal Buffer: Sparsh encoder require two frame in input: 
-    #      - the one at time t 
-    #      - the one at time t - 5.
-    # We use a deque with maxlen=6 to keep the last 6 frames.
-    # This allows us to collect the I_t (last) e I_{t-5} (first) frame
+    # 3. Buffer temporale per gestire lo Stride di 5 frame
     frame_history = collections.deque(maxlen=6)
+    last_inserted_frame = None
     
-    print("\nPipeloine started! Press 'ESC' on the video window to exit.")
+    print("\nPipeline avviata! Premi 'ESC' per uscire.")
     
     try:
         while True:
-            # capture a new frame from the DIGIT sensor
             raw_frame = digit_sensor.get_frame()
-            
-            # Applay Preprocessing (background subtraction, normalization, resizing) 
             processed_frame = pre_process_frame(raw_frame, bg_frame)
-            frame_history.append(processed_frame)
             
-            # If the history buffer is not full yet, we cannot perform inference 
-            # (we need at least 6 frames to have I_t and I_{t-5})
+            # Filtro anti-clonazione del frame
+            if last_inserted_frame is not None and np.array_equal(processed_frame, last_inserted_frame):
+                cv2.waitKey(1)
+                continue
+                
+            frame_history.append(processed_frame)
+            last_inserted_frame = processed_frame
+            
             if len(frame_history) < 6:
                 continue
                 
-            # Take the last frame (I_t) and the frame from 5 steps back (I_{t-5}) 
-            I_t = frame_history[-1]         # Last inserted (current frame)
-            I_t_minus_5 = frame_history[0]  # First inserted (5 steps back)
+            # Estrazione della coppia temporale (I_t e I_{t-5})
+            I_t = frame_history[-1]         
+            I_t_minus_5 = frame_history[0]  
             
-            # Concatena i due frame lungo la dimensione dei canali (H, W, 3+3 = 6)
             input_channels = np.concatenate([I_t, I_t_minus_5], axis=-1) 
-            
-            # Abdate the shape for PyTorch from [H, W, C] to [B, C, H, W] -> [1, 6, 224, 224]
             input_tensor = torch.from_numpy(input_channels).permute((2, 0, 1)).unsqueeze(0).to(DEVICE)
             
-            # --- INFERENZA PYTORCH (Frozen Encoder) ---
+            # --- INFERENZA DIRETTA CON FORCEFIELDMODULE ---
             with torch.no_grad():
-                # 1. Estraiamo la tupla di tensori dall'encoder
-                intermediate_features = encoder.get_intermediate_layers(
-                    input_tensor, 
-                    n=[2, 5, 8, 11], 
-                )
+                # Chiamiamo direttamente il forward del modulo completo!
+                # Restituisce un dizionario contenente le stime dense "normal" e "shear"
+                force_field_pred = model_module(input_tensor)
                 
-                # 2. TRUCCO: Trasformiamo la tupla nel Dizionario che il Decoder si aspetta!
-                # Diamo delle chiavi fittizie (i nomi dei layer) in ordine.
-                features_dict = {
-                    "t2": intermediate_features[0],
-                    "t5": intermediate_features[1],
-                    "t8": intermediate_features[2],
-                    "t11": intermediate_features[3]
-                }
-                
-                # 3. Passiamo il dizionario al decoder
-                force_field_pred = decoder(features_dict)
-                
-                # 4. Estrazione dei canali di output e conversione per OpenCV
-                if isinstance(force_field_pred, dict):
-                    normal_tensor = force_field_pred.get("normal", force_field_pred.get("depth"))
-                    shear_tensor = force_field_pred.get("shear", force_field_pred.get("flow"))
-                elif isinstance(force_field_pred, (tuple, list)):
-                    normal_tensor = force_field_pred[0]
-                    shear_tensor = force_field_pred[1]
-                else:
-                    normal_tensor = force_field_pred[:, 0:1, :, :]
-                    shear_tensor = force_field_pred[:, 1:3, :, :]
+                # Estrazione dei tensori predetti
+                normal_tensor = force_field_pred["normal"]
+                shear_tensor = force_field_pred["shear"]
 
-                # Trasformazione per OpenCV
+                # Trasformazione finale per OpenCV
                 normal_field = normal_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
                 shear_field = shear_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
             
-            # 5. Rendering del Campo di Forze
+            # 4. Rendering grafico del campo di forze
             output_view = draw_force_field(
                 normal_field, 
                 shear_field, 
                 raw_shape=raw_frame.shape,
-                force_bias=0.0,  # Applichiamo il bias di forza calibrato per ottenere un campo più realistico
-                stride=20,        # Cambia questo valore per avere una griglia più densa (es. 10) o più rada (es. 20)
-                arrow_scale=10.0  # Cambia questo per allungare/accorciare le frecce
+                force_bias=0.0,    # Lasciamo a 0.0 per analizzare la dinamica pura dei pesi reali
+                stride=14,         # Dimensione ottimale della griglia per i patch ViT
+                arrow_scale=15.0   # Moltiplicatore di visibilità delle frecce
             )
             
-            # Mostra la vista live ed il feed della camera originale
             cv2.imshow("DIGIT Raw Frame (Windows)", raw_frame)
             cv2.imshow("Sparsh Force Field Visualization", output_view)
             
-            # Interrompi se l'utente preme ESC
             if cv2.waitKey(1) == 27:
                 break
                 
     except Exception as e:
         import traceback
-        print("\n" + "!"*60)
-        print("ERRORE CRITICO NELLA PIPELINE - ECCO I DETTAGLI:")
+        print("\nERRORE CRITICO NELLA PIPELINE:")
         traceback.print_exc()
-        print("!"*60 + "\n")
         
     finally:
-        print("Disconnessione dal sensore DIGIT...")
+        print("Disconnessione dal sensore...")
         digit_sensor.disconnect()
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
