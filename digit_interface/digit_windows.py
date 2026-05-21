@@ -8,7 +8,10 @@ import typing
 import cv2
 import numpy as np
 
-from digit_interface.digit_handler_windows import DigitHandler
+try:
+    from .digit_handler_windows import DigitHandler
+except ImportError:
+    from digit_handler_windows import DigitHandler
 
 logger = logging.getLogger(__name__)
 
