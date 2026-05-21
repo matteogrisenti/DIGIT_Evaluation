@@ -10,33 +10,11 @@ from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
 from utils.draw_force_field_utility import draw_force_field
+from utils.draw_heat_map_utility import draw_heat_map
 
 
-# ==============================================================================
-# 1. TRUCCO DI BYPASS HARDWARE CHIRURGICO PER WINDOWS
-# ==============================================================================
-import sys
-
-# Invece di usare un MagicMock (che finge di avere tutto), creiamo classi vuote
-# che contengono SOLO quello che serve a 'dinov2.py' per avviarsi.
-class MockFmha:
-    pass
-
-class MockOps:
-    fmha = MockFmha()
-    # ATTENZIONE: Non inseriamo di proposito 'memory_efficient_attention' o 'unbind'.
-    # In questo modo, quando attention.py cercherà di importarli, riceverà un ImportError
-    # e si affiderà correttamente al motore di fallback nativo di PyTorch!
-
-class MockXformers:
-    ops = MockOps()
-
-if 'xformers' not in sys.modules:
-    sys.modules['xformers'] = MockXformers()
-    sys.modules['xformers.ops'] = MockOps()
-    sys.modules['xformers.ops.fmha'] = MockFmha()
-
-# ==============================================================================
+from utils.xformers_mock import patch_xformers
+patch_xformers()
 
 
 # 1. Configurazione dei Path: Aggiungiamo il sottomodulo sparsh al path di Python
@@ -215,8 +193,24 @@ def main():
                 arrow_scale=15.0   # Moltiplicatore di visibilità delle frecce
             )
             
-            cv2.imshow("DIGIT Raw Frame (Windows)", raw_frame)
-            cv2.imshow("Sparsh Force Field Visualization", output_view)
+            heatmap_view = draw_heat_map(
+                normal_field, 
+                raw_shape=raw_frame.shape,
+                max_force=2.0 # Increase this if the screen turns red too easily
+            )
+            
+            # 5. Combine the views horizontally
+            combined_view = np.hstack((output_view, heatmap_view))
+            
+            # Add labels
+            cv2.putText(combined_view, "Force Field", (10, 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.putText(combined_view, "Normal Heatmap", (raw_frame.shape[1] + 10, 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # 6. Show the screens
+            cv2.imshow("DIGIT Raw Frame", raw_frame)
+            cv2.imshow("Sparsh Multi-View", combined_view)
             
             if cv2.waitKey(1) == 27:
                 break
