@@ -12,6 +12,24 @@ from hydra.utils import instantiate
 from utils.draw_force_field_utility import draw_force_field
 
 
+# ==============================================================================
+# 1. TRUCCO DI BYPASS HARDWARE (MOCK XFORMERS PER WINDOWS)
+# ==============================================================================
+import unittest.mock as mock
+
+# Creiamo una struttura a cipolla finta per simulare xformers prima degli import di Sparsh
+mock_xformers = mock.MagicMock()
+mock_ops = mock.MagicMock()
+mock_fmha = mock.MagicMock()
+
+mock_ops.fmha = mock_fmha
+mock_xformers.ops = mock_ops
+
+sys.modules['xformers'] = mock_xformers
+sys.modules['xformers.ops'] = mock_ops
+sys.modules['xformers.ops.fmha'] = mock_fmha
+
+
 # 1. Configurazione dei Path: Aggiungiamo il sottomodulo sparsh al path di Python
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SPARSH_SUBMODULE_PATH = os.path.join(CURRENT_DIR, "sparsh")
@@ -23,6 +41,7 @@ from digit_interface.digit_windows import Digit
 
 # Importa i modelli Sparsh
 from sparsh.tactile_ssl.model.vision_transformer import vit_base
+from sparsh.tactile_ssl.downstream_task.forcefield_sl import ForceFieldDecoder
 
 
 def load_sparsh_models(checkpoints_dir, device):
@@ -61,56 +80,46 @@ def load_sparsh_models(checkpoints_dir, device):
     encoder.load_state_dict(encoder_state_dict, strict=False)
     encoder.to(device)
     encoder.eval()
-
-    import unittest.mock as mock
-    if 'xformers' not in sys.modules:
-        sys.modules['xformers'] = mock.MagicMock()
-        sys.modules['xformers.ops'] = mock.MagicMock()
-        sys.modules['xformers.ops.fmha'] = mock.MagicMock()
     
-    # --- 2. Initialization of Decoder DPT (Force Field) ---
-    print("Instantiating decoder model...")
+    # --- 2. Inizializzazione Decoder DPT ---
+    decoder = ForceFieldDecoder()
     
-    config_path = os.path.join(
-        SPARSH_SUBMODULE_PATH, 
-        "config", "experiment", "downstream_task", "forcefield", "digit_dino.yaml"
-    )
+    # Carichiamo il file del checkpoint combinato
+    decoder_path = os.path.join(checkpoints_dir, "forcefield_decoder", "digit_t1_forcefield_dino_vitbase_bg", "checkpoints","last.ckpt")
+    checkpoint = torch.load(decoder_path, map_location=device, weights_only=False)
     
-    # Load the decoder configuration using OmegaConf
-    cfg = OmegaConf.load(config_path)
-    
-    # Extract the decoder configuration from the loaded config
-    decoder_cfg = cfg.task.model_task
-    
-    # Using Hydra's instantiate to create the decoder model based on the configuration
-    decoder = instantiate(decoder_cfg)
-    
-    # Upload decoder weights
-    decoder_path = os.path.join(checkpoints_dir, "forcefield_decoder", "digit_t1_forcefield_dino_vitbase_bg", "checkpoints", "last.ckpt")
-    print("Uploading decoder weights...")
-    
-    # Load the .ckpt file
-    decoder_ckpt = torch.load(decoder_path, map_location=device, weights_only=False)
-    
-    # Extract the state_dict from the checkpoint. Depending on how it was saved.
-    if "state_dict" in decoder_ckpt:
-        decoder_state_dict = decoder_ckpt["state_dict"]
+    # Estraiamo il dizionario globale "model" scoperto dal test
+    if "model" in checkpoint:
+        global_weights = checkpoint["model"]
     else:
-        decoder_state_dict = decoder_ckpt
-    
-    # Clean the state_dict keys if they have unwanted prefixes (e.g., 'backbone.' or 'model_task.')
-    clean_decoder_dict = {}
-    for k, v in decoder_state_dict.items():
-        new_k = k.replace("model_task.", "").replace("module.", "")
-        clean_decoder_dict[new_k] = v
+        raise Exception("Errore critico: Impossibile trovare la macro-chiave 'model' nel checkpoint!")
         
-    # Upload the cleaned state_dict into the decoder model
-    decoder.load_state_dict(clean_decoder_dict, strict=False)
-    
+    # SEPARAZIONE CHIRURGICA DEI PESI
+    clean_decoder_dict = {}
+    for k, v in global_weights.items():
+        # Se la chiave appartiene al decoder (inizia con model_task.)
+        if k.startswith("model_task."):
+            # Rimuoviamo il prefisso 'model_task.' per farlo combaciare col nostro modello locale
+            # Es: 'model_task.reassembles.0...' diventa 'reassembles.0...'
+            new_k = k.replace("model_task.", "")
+            clean_decoder_dict[new_k] = v
+
+    # CARICAMENTO PARAMETRI NEL DECODER
+    # Usiamo strict=True per essere sicuri che ogni singolo peso combaci al 100%
+    try:
+        decoder.load_state_dict(clean_decoder_dict, strict=True)
+        print("--> [SUCCESS] Decoder caricato e sincronizzato al 100% con strict=True!")
+    except RuntimeError as e:
+        print("\n" + "!"*60)
+        print("Mismatch parziale nelle chiavi della testa predittiva.")
+        print("Caricamento forzato in modalità adattiva (strict=False).")
+        print("!"*60)
+        decoder.load_state_dict(clean_decoder_dict, strict=False)
+
     decoder.to(device)
     decoder.eval()
     
-    print(f"Encoder e Decoder uploaded successfully on {device}")
+    print("Tutti i modelli sono stati caricati e sono pronti per l'inferenza.")
     return encoder, decoder
 
 
