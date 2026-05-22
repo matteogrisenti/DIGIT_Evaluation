@@ -1,3 +1,6 @@
 [submodule "sparsh"]
 	path = sparsh
 	url = https://github.com/facebookresearch/sparsh.git
+[submodule "digit_interface"]
+	path = digit_interface
+	url = https://github.com/matteogrisenti/DIGIT_Windows_Interface.git
