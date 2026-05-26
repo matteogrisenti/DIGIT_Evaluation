@@ -20,8 +20,10 @@ patch_xformers()
 
 import os
 import sys
+import time
 import collections
 import traceback
+import multiprocessing as mp
 
 import cv2
 import numpy as np
@@ -41,16 +43,19 @@ if SPARSH_SUBMODULE_PATH not in sys.path:
 from digit_interface.digit_windows import Digit
 from utils.model_loader import load_sparsh_models
 from utils.display_tools import build_combined_view, show_frames, should_quit, teardown_windows
-
+from utils.dataset_write import force_dataset_worker
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 CHECKPOINTS_DIR = os.path.join(CURRENT_DIR, "outputs_sparsh", "checkpoints")
-WARMUP_FRAMES = 10          # Frames discarded before capturing background
+WARMUP_FRAMES = 90          # Frames discarded before capturing background
 TEMPORAL_STRIDE = 5         # I_t vs I_{t-5}: buffer depth = stride + 1
 BUFFER_SIZE = TEMPORAL_STRIDE + 1
 
+RECORD_DATASET = True                # Activate/Deactivate dataset recording
+RECORDING_DURATION_SEC = 15.0        # Duration of the recording in seconds
+DATASET_OUTPUT_DIR = os.path.join(CURRENT_DIR, "force_datasets")
 
 # ---------------------------------------------------------------------------
 # Frame pre-processing
@@ -138,12 +143,30 @@ def main() -> None:
     frame_history: collections.deque = collections.deque(maxlen=BUFFER_SIZE)
     last_frame: np.ndarray | None = None
 
+    # 4. Dataset recording subprocess setup
+    is_recording = RECORD_DATASET
+    dataset_queue = None
+    worker_process = None
+
+    if is_recording:
+        # Create a multiprocessing queue and start the dataset writer worker process
+        dataset_queue = mp.Queue(maxsize=1000)
+        worker_process = mp.Process(
+            target=force_dataset_worker, 
+            args=(dataset_queue, DATASET_OUTPUT_DIR, RECORDING_DURATION_SEC)
+        )
+        worker_process.start()
+        print(f"Main loop (PID: {os.getpid()}) sta inviando i dati al Worker.")
+
     print("\nPipeline running. Press ESC to quit.")
 
     try:
         while True:
             raw_frame = sensor.get_frame()
+            # print(f"DEBUG: Frame dimensions: {raw_frame.shape}")
             processed = pre_process_frame(raw_frame, bg_frame)
+
+            t_attuale = time.time()
 
             # Skip duplicate frames (sensor may repeat the last frame)
             if last_frame is not None and np.array_equal(processed, last_frame):
@@ -165,7 +188,17 @@ def main() -> None:
             # 5. Inference
             normal_field, shear_field = run_inference(model, input_pair, device)
 
-            # 6. Render and display
+            # 6. Send data to the dataset worker if recording and worker is alive
+            if is_recording and worker_process.is_alive():
+                try:
+                    # Send a tuple of (normal_field, shear_field, timestamp) to the worker
+                    dataset_queue.put_nowait((normal_field, shear_field, t_attuale))
+                except mp.queues.Full:
+                    pass # If the queue is full, we skip this frame to avoid blocking the main loop
+            elif is_recording and not worker_process.is_alive():
+                is_recording = False # Stop trying to send data if the worker has died
+
+            # 7. Render and display
             combined = build_combined_view(normal_field, shear_field, raw_frame)
             show_frames(raw_frame, combined)
 
@@ -180,6 +213,40 @@ def main() -> None:
         print("Disconnecting from sensor…")
         sensor.disconnect()
         teardown_windows()
+        print("Sensor disconnected")
+
+        if worker_process is not None:
+            if worker_process.is_alive():
+                print("\n[Main] Il worker è ancora in esecuzione. Inviando segnale di arresto...")
+                try:
+                    dataset_queue.put(None)  # Segnale di stop
+                except Exception:
+                    pass
+                worker_process.join(timeout=5)
+                
+                # Se dopo 5 secondi è ancora vivo, forziamo la chiusura
+                if worker_process.is_alive():
+                    print("[Main] Il worker non risponde. Chiusura forzata.")
+                    worker_process.terminate()
+            else:
+                print("\n[Main] Il worker ha concluso naturalmente il suo lavoro.")
+                # Dobbiamo comunque chiamare join per liberare le risorse del sistema operativo!
+                worker_process.join() 
+            
+            # --- FIX ANTI-DEADLOCK PER LA CODA ---
+            if dataset_queue is not None:
+                # 1. Svuotiamo fisicamente la coda da eventuali frame rimasti intrappolati
+                while not dataset_queue.empty():
+                    try:
+                        dataset_queue.get_nowait()
+                    except Exception:
+                        break
+                
+                # 2. Diciamo a Python di NON aspettare che i dati vengano consumati (risolve il freeze!)
+                dataset_queue.cancel_join_thread()
+                dataset_queue.close()
+                
+            print("[Main] Sottoprocessi chiusi correttamente.")
 
 
 if __name__ == "__main__":
