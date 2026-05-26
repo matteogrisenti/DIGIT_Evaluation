@@ -3,6 +3,9 @@ import matplotlib.pyplot as plt
 import os
 import cv2
 
+from utils.draw_heat_map_utility import draw_heat_map
+from utils.draw_force_field_utility import draw_force_field
+
 RAW_FRAME_DIMENSIONS = (320, 240)
 
 def load_dataset(file_path: str):
@@ -62,71 +65,90 @@ def plot_force_signals(file_path: str) -> None:
     plt.show()
 
 
-def analyze_sensor_noise(file_path: str, raw_shape: tuple[int, int] = RAW_FRAME_DIMENSIONS ) -> None:
-    """
-    Utility 2: Studies the noise characteristics of the sensor by analyzing the variance of the force measurements over time.
-    This function should be used on a dataset recorded WITHOUT touching the gel.
-    """
+def analyze_sensor_noise(file_path: str, raw_shape: tuple[int, int] = RAW_FRAME_DIMENSIONS) -> None:
     normal, shear, timestamps = load_dataset(file_path)
     
-    print(f"Noise analysis started on {len(timestamps)} frames ({timestamps[-1] - timestamps[0]:.2f} sec)")
+    print(f"\nAnalisi avviata su {len(timestamps)} frame ({timestamps[-1] - timestamps[0]:.2f} sec)")
     
-    # 1. Standard Deviation Over Time: 
-    # For each pixel, calculate the std of the force measurements across all frames.
+    # =========================================================================
+    # 1. CALCOLO DELL'OFFSET (Media Assoluta nel tempo)
+    # =========================================================================
+    mean_normal = np.mean(normal, axis=0)
+    mean_shear = np.mean(shear, axis=0)  # Questo mantiene le 2 componenti (X, Y)
+    
+    mean_normal_mag = mean_normal[:, :, 0] if mean_normal.ndim == 3 else mean_normal
+    mean_shear_mag = np.linalg.norm(mean_shear, axis=-1)
+    
+    # --- OFFSET NORMALE (Mappa di calore) ---
+    normal_mean_bgr = draw_heat_map(mean_normal_mag, raw_shape=raw_shape, max_force=2.0)
+    
+    # --- OFFSET SHEAR (Campo Vettoriale / Freccette) ---
+    # Usiamo la tua utility passando le medie vettoriali. 
+    # force_bias=0.0 assicura che ci mostri anche le freccette più piccole dell'offset.
+    shear_mean_bgr = draw_force_field(mean_normal, mean_shear, raw_shape=raw_shape)
+    
+    # Conversione BGR -> RGB per Matplotlib
+    normal_mean_rgb = cv2.cvtColor(normal_mean_bgr, cv2.COLOR_BGR2RGB)
+    shear_mean_rgb = cv2.cvtColor(shear_mean_bgr, cv2.COLOR_BGR2RGB)
+
+    # =========================================================================
+    # 2. CALCOLO DEL RUMORE (Deviazione Standard nel tempo)
+    # =========================================================================
     normal_std_map = np.std(normal, axis=0)
     shear_std_map = np.std(shear, axis=0)
     
-    # Normalize the noise maps to get a single "noise magnitude" value for each pixel 
-    # (useful for visualization)
-    normal_noise_magnitude = np.linalg.norm(normal_std_map, axis=-1)
+    normal_noise_magnitude = np.linalg.norm(normal_std_map, axis=-1) if normal_std_map.ndim == 3 else normal_std_map
     shear_noise_magnitude = np.linalg.norm(shear_std_map, axis=-1)
     
-    # 2. Global Noise Metrics: 
-    # Calculate the mean and max noise magnitude across the entire sensor to get a sense of overall noise levels.
-    global_mean_normal_noise = np.mean(normal_noise_magnitude)
-    global_max_normal_noise = np.max(normal_noise_magnitude)
-    
-    global_mean_shear_noise = np.mean(shear_noise_magnitude)
-    global_max_shear_noise = np.max(shear_noise_magnitude)
-    
-    print("-" * 40)
-    print("METRICHE DI RUMORE GLOBALI (Deviazione Std media nel tempo)")
-    print(f"Forza Normale -> Rumore Medio: {global_mean_normal_noise:.5f} | Picco: {global_max_normal_noise:.5f}")
-    print(f"Forza Taglio  -> Rumore Medio: {global_mean_shear_noise:.5f}  | Picco: {global_max_shear_noise:.5f}")
-    print("-" * 40)
-    
-    # --- RESIZE PER LA VISUALIZZAZIONE RETTANGOLARE ---
-    # Invertiamo (Altezza, Larghezza) di NumPy in (Larghezza, Altezza) per OpenCV
     cv2_target_size = (raw_shape[1], raw_shape[0]) 
-    
-    # Applichiamo un'interpolazione cubica per avere una mappa sfumata e pulita
     normal_noise_vis = cv2.resize(normal_noise_magnitude, cv2_target_size, interpolation=cv2.INTER_CUBIC)
     shear_noise_vis = cv2.resize(shear_noise_magnitude, cv2_target_size, interpolation=cv2.INTER_CUBIC)
+
+    # =========================================================================
+    # 3. METRICHE GLOBALI
+    # =========================================================================
+    global_mean_normal_offset = np.mean(mean_normal_mag)
+    global_mean_shear_offset = np.mean(mean_shear_mag)
     
-    # 3. Visualizzazione spaziale del rumore (Heatmaps)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    global_mean_normal_noise = np.mean(normal_noise_magnitude)
+    global_mean_shear_noise = np.mean(shear_noise_magnitude)
     
-    im1 = ax1.imshow(normal_noise_vis, cmap="viridis")
-    ax1.set_title(f"Mappa Rumore Normale (Media: {global_mean_normal_noise:.4f})")
-    fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+    print("-" * 55)
+    print("METRICHE DEL SENSORE A RIPOSO")
+    print(f"Forza Normale -> OFFSET: {global_mean_normal_offset:.4f} N | RUMORE: {global_mean_normal_noise:.4f} N")
+    print(f"Forza Taglio  -> OFFSET: {global_mean_shear_offset:.4f} N | RUMORE: {global_mean_shear_noise:.4f} N")
+    print("-" * 55)
     
-    im2 = ax2.imshow(shear_noise_vis, cmap="plasma")
-    ax2.set_title(f"Mappa Rumore Shear (Media: {global_mean_shear_noise:.4f})")
-    fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+    # =========================================================================
+    # 4. VISUALIZZAZIONE GRAFICA 2x2
+    # =========================================================================
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
     
-    plt.suptitle("Analisi Spaziale del Rumore del Sensore", fontsize=14)
+    # NORMALE
+    axs[0, 0].imshow(normal_mean_rgb)
+    axs[0, 0].set_title(f"NORMALE: Offset di Base (Media: {global_mean_normal_offset:.4f} N)")
+    axs[0, 0].axis("off")
+    
+    im1 = axs[0, 1].imshow(normal_noise_vis, cmap="viridis")
+    axs[0, 1].set_title(f"NORMALE: Rumore/Tremolio (Media: {global_mean_normal_noise:.4f} N)")
+    fig.colorbar(im1, ax=axs[0, 1], fraction=0.046, pad=0.04)
+    
+    # SHEAR
+    axs[1, 0].imshow(shear_mean_rgb)
+    axs[1, 0].set_title(f"SHEAR: Vettori Offset (Magnitudo Media: {global_mean_shear_offset:.4f} N)")
+    axs[1, 0].axis("off")
+    
+    im2 = axs[1, 1].imshow(shear_noise_vis, cmap="plasma")
+    axs[1, 1].set_title(f"SHEAR: Rumore/Tremolio (Media: {global_mean_shear_noise:.4f} N)")
+    fig.colorbar(im2, ax=axs[1, 1], fraction=0.046, pad=0.04)
+    
+    plt.suptitle("Analisi del Sensore a Riposo: Offset vs Rumore", fontsize=16, fontweight="bold")
     plt.tight_layout()
     plt.show()
 
 if __name__ == "__main__":
-    # Sostituisci con il nome del tuo file appena generato!
-    TEST_FILE = "force_datasets/force_record_20260526_125851.npz"
+    # Inserisci il nome del tuo file!
+    TEST_FILE = "force_datasets/force_record_20260526_133840.npz"
     
-    # De-commenta una delle due funzioni in base a ciò che vuoi studiare:
-    
-    # 1. Per studiare i contatti nel tempo:
-    plot_force_signals(TEST_FILE)
-    
-    # 2. Per valutare il rumore (assicurati che il dataset sia a vuoto/riposo):
+    # plot_force_signals(TEST_FILE)
     analyze_sensor_noise(TEST_FILE)
-    pass

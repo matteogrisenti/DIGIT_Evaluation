@@ -67,6 +67,7 @@ def build_combined_view(
         normal_field,
         raw_shape=raw_shape,
         max_force=_MAX_NORMAL_FORCE,
+        bg_threshold=0.12,  
     )
 
     combined = np.hstack((force_view, heat_view))
@@ -98,4 +99,4 @@ def _overlay_labels(image: np.ndarray, width: int) -> None:
     """Burn column labels into the combined view in-place."""
     font = cv2.FONT_HERSHEY_SIMPLEX
     cv2.putText(image, "Force Field",    (10, 20),          font, 0.6, (255, 255, 255), 2)
-    cv2.putText(image, "Normal Heatmap", (width + 10, 20),  font, 0.6, (255, 255, 255), 2)
+    cv2.putText(image, "Normal Heatmap", (width + 75 + 10, 20),  font, 0.6, (255, 255, 255), 2)

@@ -5,9 +5,9 @@ def draw_heat_map(
     normal_field, 
     raw_shape=None, 
     max_force=2.0, 
-    colormap=cv2.COLORMAP_INFERNO, 
+    colormap=cv2.COLORMAP_VIRIDIS, 
     blur_ksize=(21, 21), 
-    bg_threshold=0.05
+    bg_threshold=0.01
 ):
     """
     Generates a smoothed, professional heatmap resembling the original Sparsh reference.
@@ -34,9 +34,10 @@ def draw_heat_map(
     
     # 4. Normalize the forces to a 0.0 - 1.0 scale based on the max_force
     normal_normalized = np.clip(normal_mag / max_force, 0.0, 1.0)
+    normalized_threshold = bg_threshold / max_force  # Adjust background threshold to normalized scale
     
-    # 5. INVERT THE SCALE: The reference uses Yellow for lowest forces and Black for highest.
-    # INFERNO puts 255 at Yellow and 0 at Black, so we invert the normalized data.
+    # 5. INVERT THE SCALE: The reference uses Green for lowest forces and Blue for highest.
+    # VIRIDIS puts 255 at Green and 0 at Blue, so we invert the normalized data.
     inverted_normalized = 1.0 - normal_normalized
     normal_uint8 = (inverted_normalized * 255).astype(np.uint8)
     
@@ -44,7 +45,7 @@ def draw_heat_map(
     heatmap_view = cv2.applyColorMap(normal_uint8, colormap)
     
     # 7. WHITE BACKGROUND MASK: Find areas with near-zero force and paint them white
-    bg_mask = normal_normalized < bg_threshold
+    bg_mask = normal_normalized < normalized_threshold
     heatmap_view[bg_mask] = [255, 255, 255]
     
     # 8. Resize to match the target camera shape
@@ -52,5 +53,20 @@ def draw_heat_map(
         target_size = (raw_shape[1], raw_shape[0]) 
         if (heatmap_view.shape[1], heatmap_view.shape[0]) != target_size:
             heatmap_view = cv2.resize(heatmap_view, target_size, interpolation=cv2.INTER_LINEAR)
+    
+    # 9. Add a vertical colorbar on the right side for reference
+    target_h = heatmap_view.shape[0]
+    bar_width = 75
+    colorbar = np.full((target_h, bar_width, 3), 255, dtype=np.uint8)
             
-    return heatmap_view
+    # Create a vertical gradient for the colorbar
+    gradient = np.linspace(0, 1, target_h).reshape(-1, 1)
+    gradient = np.repeat(gradient, 15, axis=1)
+    gradient_colored = cv2.applyColorMap((gradient * 255).astype(np.uint8), colormap)
+    colorbar[:, 5:20] = gradient_colored
+    
+    # Annotate the colorbar with force values
+    cv2.putText(colorbar, f"{max_force:.2f}N", (25, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
+    cv2.putText(colorbar, "0.00N", (25, target_h - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
+    
+    return np.hstack((heatmap_view, colorbar))
