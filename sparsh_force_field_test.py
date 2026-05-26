@@ -54,7 +54,7 @@ TEMPORAL_STRIDE = 5         # I_t vs I_{t-5}: buffer depth = stride + 1
 BUFFER_SIZE = TEMPORAL_STRIDE + 1
 
 RECORD_DATASET = True                # Activate/Deactivate dataset recording
-RECORDING_DURATION_SEC = 15.0        # Duration of the recording in seconds
+RECORDING_DURATION_SEC = 90          # Duration of the recording in seconds
 DATASET_OUTPUT_DIR = os.path.join(CURRENT_DIR, "force_datasets")
 
 # ---------------------------------------------------------------------------
