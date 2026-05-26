@@ -65,8 +65,29 @@ def draw_heat_map(
     gradient_colored = cv2.applyColorMap((gradient * 255).astype(np.uint8), colormap)
     colorbar[:, 5:20] = gradient_colored
     
-    # Annotate the colorbar with force values
-    cv2.putText(colorbar, f"{max_force:.2f}N", (25, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
-    cv2.putText(colorbar, "0.00N", (25, target_h - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
+    # Add tick marks and labels to the colorbar
+    num_ticks = 5  # 5 levels (0%, 25%, 50%, 75%, 100%)
+    
+    for i in range(num_ticks):
+        # compute the value corresponding to this tick
+        fraction = i / (num_ticks - 1)
+        val = fraction * max_force
+        
+        # compute the position Y (0 is at the top, target_h is at the bottom)
+        y = int((target_h - 1) * (1.0 - fraction))
+        
+        # draw the tick mark (horizontal line) that extends from the gradient (from X=20 to X=25)
+        cv2.line(colorbar, (20, y), (25, y), (0, 0, 0), 1)
+        
+        # adjust the position Y of the text to avoid cutting it at the edges
+        if i == 0:  # minimum value (at the bottom)
+            text_y = y - 4
+        elif i == num_ticks - 1:  # maximum value (at the top)
+            text_y = y + 12
+        else:  # intermediate values    
+            text_y = y + 4
+            
+        # draw the text for the value
+        cv2.putText(colorbar, f"{val:.2f}N", (28, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
     
     return np.hstack((heatmap_view, colorbar))
