@@ -161,7 +161,7 @@ def analyze_sensor_noise(file_path: str, raw_shape: tuple[int, int] = RAW_FRAME_
 
 if __name__ == "__main__":
     # Insert your file name here!
-    TEST_FILE = "force_datasets/force_record_noise_study.npz"
+    TEST_FILE = "../force_datasets/force_record_noise_study.npz"
     
     # plot_force_signals(TEST_FILE)
     analyze_sensor_noise(TEST_FILE)
