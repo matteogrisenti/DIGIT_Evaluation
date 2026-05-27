@@ -55,7 +55,7 @@ BUFFER_SIZE = TEMPORAL_STRIDE + 1
 
 RECORD_FORCE_DATASET = True                # Activate/Deactivate force dataset recording
 RECORD_FRAME_DATASET = True                # Activate/Deactivate force dataset recording
-RECORDING_DURATION_SEC = 10                # Duration of the recording in seconds
+RECORDING_DURATION_SEC = 90                # Duration of the recording in seconds
 
 timestamp_str = time.strftime("%Y%m%d_%H%M%S")
 DATASET_OUTPUT_DIR = os.path.join(CURRENT_DIR, "experiments_output", timestamp_str)
@@ -243,11 +243,11 @@ def main() -> None:
                     force_queue.put(None)  # Segnale di stop
                 except Exception:
                     pass
-                force_worker.join(timeout=5)
+                force_worker.join(timeout=60)
                 
-                # Se dopo 5 secondi è ancora vivo, forziamo la chiusura
+                # Se dopo 60 secondi è ancora vivo, forziamo la chiusura
                 if force_worker.is_alive():
-                    print("[Main] Il worker non risponde. Chiusura forzata.")
+                    print("[Main] Il worker non risponde dopo 60 secondi. Chiusura forzata.")
                     force_worker.terminate()
             else:
                 print("\n[Main] Il worker ha concluso naturalmente il suo lavoro.")

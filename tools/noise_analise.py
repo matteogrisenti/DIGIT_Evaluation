@@ -1,7 +1,13 @@
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import os
 import cv2
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(CURRENT_DIR)
+if PARENT_DIR not in sys.path:
+    sys.path.insert(0, PARENT_DIR)
 
 from utils.draw_heat_map_utility import draw_heat_map
 from utils.draw_force_field_utility import draw_force_field
@@ -130,25 +136,25 @@ def analyze_sensor_noise(file_path: str, raw_shape: tuple[int, int] = RAW_FRAME_
     
     # NORMAL - OFFSET
     axs[0, 0].imshow(normal_mean_rgb)
-    axs[0, 0].set_title(f"NORMAL: Base Offset (Mean: {global_mean_normal_offset:.4f} N)", fontsize=12)
+    axs[0, 0].set_title(f"NORMAL: Base Offset \n(Mean: {global_mean_normal_offset:.4f} N)", fontsize=12)
     axs[0, 0].axis("off")
     
     # NORMAL - NOISE (Grayscale mapping: white=0, dark gray=max)
     # Using 'gray_r' (reversed gray) colormap where 0 is white.
     im1 = axs[0, 1].imshow(normal_noise_vis, cmap="gray_r", vmin=0)
-    axs[0, 1].set_title(f"NORMAL: Noise/Jitter (Mean: {global_mean_normal_noise:.4f} N)", fontsize=12)
+    axs[0, 1].set_title(f"NORMAL: Noise/Jitter \n(Mean: {global_mean_normal_noise:.4f} N)", fontsize=12)
     axs[0, 1].axis("off")
     cbar1 = fig.colorbar(im1, ax=axs[0, 1], fraction=0.046, pad=0.04)
     cbar1.set_label('Std Dev [N]')
     
     # SHEAR - OFFSET
     axs[1, 0].imshow(shear_mean_rgb)
-    axs[1, 0].set_title(f"SHEAR: Offset Vectors (Mean Magnitude: {global_mean_shear_offset:.4f} N)", fontsize=12)
+    axs[1, 0].set_title(f"SHEAR: Offset Vectors \n(Mean Magnitude: {global_mean_shear_offset:.4f} N)", fontsize=12)
     axs[1, 0].axis("off")
     
     # SHEAR - NOISE (Grayscale mapping: white=0, dark gray=max)
     im2 = axs[1, 1].imshow(shear_noise_vis, cmap="gray_r", vmin=0)
-    axs[1, 1].set_title(f"SHEAR: Noise/Jitter (Mean: {global_mean_shear_noise:.4f} N)", fontsize=12)
+    axs[1, 1].set_title(f"SHEAR: Noise/Jitter \n(Mean: {global_mean_shear_noise:.4f} N)", fontsize=12)
     axs[1, 1].axis("off")
     cbar2 = fig.colorbar(im2, ax=axs[1, 1], fraction=0.046, pad=0.04)
     cbar2.set_label('Std Dev [N]')
@@ -161,7 +167,7 @@ def analyze_sensor_noise(file_path: str, raw_shape: tuple[int, int] = RAW_FRAME_
 
 if __name__ == "__main__":
     # Insert your file name here!
-    TEST_FILE = "../force_datasets/force_record_noise_study.npz"
+    TEST_FILE = "experiments_output/noise_study/force_record_noise_study.npz"
     
     # plot_force_signals(TEST_FILE)
     analyze_sensor_noise(TEST_FILE)
