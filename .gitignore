@@ -4,3 +4,4 @@
 *outputs_sparsh/checkpoints/forcefield_decoder/
 *outputs_sparsh/checkpoints/encoder_dino/
 *force_datasets/
+*experiments_output/

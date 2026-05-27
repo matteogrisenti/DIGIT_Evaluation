@@ -43,7 +43,7 @@ if SPARSH_SUBMODULE_PATH not in sys.path:
 from digit_interface.digit_windows import Digit
 from utils.model_loader import load_sparsh_models
 from utils.display_tools import build_combined_view, show_frames, should_quit, teardown_windows
-from utils.dataset_write import force_dataset_worker
+from utils.dataset_write import force_dataset_worker, raw_frame_worker
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -53,9 +53,12 @@ WARMUP_FRAMES = 90          # Frames discarded before capturing background
 TEMPORAL_STRIDE = 5         # I_t vs I_{t-5}: buffer depth = stride + 1
 BUFFER_SIZE = TEMPORAL_STRIDE + 1
 
-RECORD_DATASET = True                # Activate/Deactivate dataset recording
-RECORDING_DURATION_SEC = 90          # Duration of the recording in seconds
-DATASET_OUTPUT_DIR = os.path.join(CURRENT_DIR, "force_datasets")
+RECORD_FORCE_DATASET = True                # Activate/Deactivate force dataset recording
+RECORD_FRAME_DATASET = True                # Activate/Deactivate force dataset recording
+RECORDING_DURATION_SEC = 10                # Duration of the recording in seconds
+
+timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+DATASET_OUTPUT_DIR = os.path.join(CURRENT_DIR, "experiments_output", timestamp_str)
 
 # ---------------------------------------------------------------------------
 # Frame pre-processing
@@ -144,19 +147,33 @@ def main() -> None:
     last_frame: np.ndarray | None = None
 
     # 4. Dataset recording subprocess setup
-    is_recording = RECORD_DATASET
-    dataset_queue = None
-    worker_process = None
+    is_recording = RECORD_FORCE_DATASET or RECORD_FRAME_DATASET
+    force_queue = None
+    video_queue = None
+    force_worker = None
+    video_worker = None
 
     if is_recording:
         # Create a multiprocessing queue and start the dataset writer worker process
-        dataset_queue = mp.Queue(maxsize=1000)
-        worker_process = mp.Process(
-            target=force_dataset_worker, 
-            args=(dataset_queue, DATASET_OUTPUT_DIR, RECORDING_DURATION_SEC)
-        )
-        worker_process.start()
-        print(f"Main loop (PID: {os.getpid()}) sta inviando i dati al Worker.")
+        if RECORD_FORCE_DATASET:
+            force_queue = mp.Queue(maxsize=1000)
+
+            force_worker = mp.Process(
+                target=force_dataset_worker, 
+                args=(force_queue, DATASET_OUTPUT_DIR, RECORDING_DURATION_SEC)
+            )
+            force_worker.start()
+            print(f"Main loop (PID: {os.getpid()}) sta inviando i dati al Force Worker.")
+        
+        if RECORD_FRAME_DATASET:
+            video_queue = mp.Queue(maxsize=1000)
+            video_worker = mp.Process(
+                target=raw_frame_worker,
+                args=(video_queue, DATASET_OUTPUT_DIR, RECORDING_DURATION_SEC)
+            )
+            video_worker.start()
+            print(f"Main loop (PID: {os.getpid()}) sta inviando i dati al Video Worker.")
+        
 
     print("\nPipeline running. Press ESC to quit.")
 
@@ -189,14 +206,18 @@ def main() -> None:
             normal_field, shear_field = run_inference(model, input_pair, device)
 
             # 6. Send data to the dataset worker if recording and worker is alive
-            if is_recording and worker_process.is_alive():
-                try:
-                    # Send a tuple of (normal_field, shear_field, timestamp) to the worker
-                    dataset_queue.put_nowait((normal_field, shear_field, t_attuale))
-                except mp.queues.Full:
-                    pass # If the queue is full, we skip this frame to avoid blocking the main loop
-            elif is_recording and not worker_process.is_alive():
-                is_recording = False # Stop trying to send data if the worker has died
+            if is_recording:
+                if force_worker.is_alive():
+                    try:
+                        force_queue.put_nowait((normal_field, shear_field, t_attuale))
+                    except mp.queues.Full:
+                        pass
+                
+                if video_worker.is_alive():
+                    try:
+                        video_queue.put_nowait((raw_frame, t_attuale))
+                    except mp.queues.Full:
+                        pass
 
             # 7. Render and display
             combined = build_combined_view(normal_field, shear_field, raw_frame)
@@ -215,38 +236,64 @@ def main() -> None:
         teardown_windows()
         print("Sensor disconnected")
 
-        if worker_process is not None:
-            if worker_process.is_alive():
+        if force_worker is not None:
+            if force_worker.is_alive():
                 print("\n[Main] Il worker è ancora in esecuzione. Inviando segnale di arresto...")
                 try:
-                    dataset_queue.put(None)  # Segnale di stop
+                    force_queue.put(None)  # Segnale di stop
                 except Exception:
                     pass
-                worker_process.join(timeout=5)
+                force_worker.join(timeout=5)
                 
                 # Se dopo 5 secondi è ancora vivo, forziamo la chiusura
-                if worker_process.is_alive():
+                if force_worker.is_alive():
                     print("[Main] Il worker non risponde. Chiusura forzata.")
-                    worker_process.terminate()
+                    force_worker.terminate()
             else:
                 print("\n[Main] Il worker ha concluso naturalmente il suo lavoro.")
                 # Dobbiamo comunque chiamare join per liberare le risorse del sistema operativo!
-                worker_process.join() 
+                force_worker.join() 
             
-            # --- FIX ANTI-DEADLOCK PER LA CODA ---
-            if dataset_queue is not None:
+            if force_queue is not None:
                 # 1. Svuotiamo fisicamente la coda da eventuali frame rimasti intrappolati
-                while not dataset_queue.empty():
+                while not force_queue.empty():
                     try:
-                        dataset_queue.get_nowait()
+                        force_queue.get_nowait()
                     except Exception:
                         break
                 
                 # 2. Diciamo a Python di NON aspettare che i dati vengano consumati (risolve il freeze!)
-                dataset_queue.cancel_join_thread()
-                dataset_queue.close()
+                force_queue.cancel_join_thread()
+                force_queue.close()
                 
-            print("[Main] Sottoprocessi chiusi correttamente.")
+            print("[Main] Force Worker terminato e risorse liberate.")
+        
+        if video_worker is not None:
+            if video_worker.is_alive():
+                print("\n[Main] Il Video Worker è ancora in esecuzione. Inviando segnale di arresto...")
+                try:
+                    video_queue.put(None)
+                except Exception:
+                    pass
+                video_worker.join(timeout=5)
+
+                if video_worker.is_alive():
+                    video_worker.terminate()
+            else:
+                print("\n[Main] Il Video Worker ha concluso naturalmente il suo lavoro.")
+                video_worker.join()
+            
+            if video_queue is not None:
+                while not video_queue.empty():
+                    try:
+                        video_queue.get_nowait()
+                    except Exception:
+                        break
+
+                video_queue.cancel_join_thread()
+                video_queue.close()
+            
+            print("[Main] Video Worker terminato e risorse liberate.")
 
 
 if __name__ == "__main__":

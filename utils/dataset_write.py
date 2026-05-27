@@ -2,6 +2,7 @@ import multiprocessing as mp
 import time
 import os
 import numpy as np
+import cv2
 
 # ---------------------------------------------------------------------------
 # Force Dataset Worker (Processo Separato)
@@ -54,3 +55,48 @@ def force_dataset_worker(queue: mp.Queue, output_dir: str, duration: float) -> N
     normal_frames.clear()
     shear_frames.clear()
     timestamps.clear()
+
+
+
+# ---------------------------------------------------------------------------
+# Raw Frame Image Worker (Processo Separato)
+# ---------------------------------------------------------------------------
+def raw_frame_worker(queue: mp.Queue, output_dir: str, duration: float) -> None:
+    """
+    Worker che riceve i raw frame dal sensore e li salva come singole immagini PNG
+    in una cartella dedicata.
+    """
+    print(f"\n[Raw Worker] Salvataggio frame singoli avviato (PID: {os.getpid()})")
+    
+    start_time = None
+    frames_saved = 0
+    frames_dir = ""
+    
+    while True:
+        item = queue.get()
+        if item is None:  # Segnale di arresto
+            break
+            
+        frame, t = item
+        
+        # Inizializzazione al primo frame ricevuto
+        if start_time is None:
+            start_time = t
+            timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+            
+            # Crea una sottocartella dedicata per i frame di questa sessione
+            frames_dir = os.path.join(output_dir, f"raw_frames_{timestamp_str}")
+            os.makedirs(frames_dir, exist_ok=True)
+            print(f"[Raw Worker] Cartella creata: {frames_dir}")
+            
+        # Salvataggio del frame come immagine 
+        # Usiamo PNG (compressione lossless) per mantenere i dati intatti
+        frame_filename = os.path.join(frames_dir, f"frame_{frames_saved:06d}.png")
+        cv2.imwrite(frame_filename, frame)
+        frames_saved += 1
+        
+        # Controllo durata
+        if (t - start_time) > duration:
+            break
+
+    print(f"\n[Raw Worker] Chiusura. Salvati {frames_saved} frame nella cartella: {frames_dir}")
