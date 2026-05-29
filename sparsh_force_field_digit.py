@@ -53,9 +53,9 @@ WARMUP_FRAMES = 90          # Frames discarded before capturing background
 TEMPORAL_STRIDE = 5         # I_t vs I_{t-5}: buffer depth = stride + 1
 BUFFER_SIZE = TEMPORAL_STRIDE + 1
 
-RECORD_FORCE_DATASET = True                # Activate/Deactivate force dataset recording
+RECORD_FORCE_DATASET = False                # Activate/Deactivate force dataset recording
 RECORD_FRAME_DATASET = True                # Activate/Deactivate force dataset recording
-RECORDING_DURATION_SEC = 90                # Duration of the recording in seconds
+RECORDING_DURATION_SEC = 180                # Duration of the recording in seconds
 
 timestamp_str = time.strftime("%Y%m%d_%H%M%S")
 DATASET_OUTPUT_DIR = os.path.join(CURRENT_DIR, "experiments_output", timestamp_str)
@@ -207,13 +207,13 @@ def main() -> None:
 
             # 6. Send data to the dataset worker if recording and worker is alive
             if is_recording:
-                if force_worker.is_alive():
+                if force_worker is not None and force_worker.is_alive():
                     try:
                         force_queue.put_nowait((normal_field, shear_field, t_attuale))
                     except mp.queues.Full:
                         pass
                 
-                if video_worker.is_alive():
+                if video_worker is not None and video_worker.is_alive():
                     try:
                         video_queue.put_nowait((raw_frame, t_attuale))
                     except mp.queues.Full:
